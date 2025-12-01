@@ -52,22 +52,31 @@ struct TaskState {
 };
 
 int run_edf(int jobs_per_task) {
+
+    struct timespec global_start, global_end;
+    clock_gettime(CLOCK_MONOTONIC, &global_start);
+
+    // GPIO pins
     int g1 = 17;
     int g2 = 27;
     int g3 = 22;
+    int jitter_led = 5;
 
+
+    // Setup pins all start off
     export_gpio(g1); set_gpio_direction(g1, "out"); set_gpio_value(g1, 0);
     export_gpio(g2); set_gpio_direction(g2, "out"); set_gpio_value(g2, 0);
     export_gpio(g3); set_gpio_direction(g3, "out"); set_gpio_value(g3, 0);
+    export_gpio(jitter_led);set_gpio_direction(jitter_led, "out");set_gpio_value(jitter_led, 0); 
 
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
 
     TaskState T[3];
 
-    T[0].cfg = {"T1_10ms",  g1, 10, 2};
-    T[1].cfg = {"T2_50ms",  g2, 50, 5};
-    T[2].cfg = {"T3_100ms", g3, 100, 8};
+    T[0].cfg = {"T1_10ms",  g1, 10, 1};
+    T[1].cfg = {"T2_50ms",  g2, 50, 2};
+    T[2].cfg = {"T3_100ms", g3, 100, 3};
 
     // Initialize timing
     for (int i = 0; i < 3; i++) {
@@ -128,6 +137,16 @@ int run_edf(int jobs_per_task) {
         t->total_jitter += jitter;
         if (jitter > t->worst_jitter) t->worst_jitter = jitter;
 
+          // ----- Jitter Alarm LED -----
+        // If jitter is greater than threshold_us, turn LED on
+        long threshold_us = 1000; // 1ms threshold
+        if (jitter > threshold_us) {
+            set_gpio_value(5, 1);   // alarm ON
+        } else {
+            set_gpio_value(5, 0);   // alarm OFF
+        }
+
+
         // Toggle LED
         t->led_state = !t->led_state;
         set_gpio_value(t->cfg.gpio, t->led_state);
@@ -155,6 +174,8 @@ int run_edf(int jobs_per_task) {
     set_gpio_value(g1, 0);
     set_gpio_value(g2, 0);
     set_gpio_value(g3, 0);
+    set_gpio_value(jitter_led, 0);
+
 
     // Print stats
     for (int i = 0; i < 3; i++) {
@@ -163,7 +184,24 @@ int run_edf(int jobs_per_task) {
         printf("  Worst jitter: %.3f ms\n", T[i].worst_jitter / 1000.0);
         printf("  Avg jitter:   %.3f ms\n", avg_ms);
         printf("  Deadline misses: %d\n\n", T[i].misses);
-    }
 
+            // ---- Total stats for EDF ----
+    int total_misses = 0;
+    for (int i = 0; i < 3; i++) {
+        total_misses += T[i].misses;
+    }
+    double avg_misses_per_task = (double)total_misses / 3.0;
+
+    clock_gettime(CLOCK_MONOTONIC, &global_end);
+    long total_us = diff_us(global_end, global_start);
+    double total_sec = (double)total_us / 1000000.0;
+
+    printf("EDF - TOTAL deadline misses (all tasks): %d\n", total_misses);
+    printf("EDF - Average deadline misses per task: %.2f\n", avg_misses_per_task);
+    printf("EDF - Total run time: %.3f seconds\n\n", total_sec);
+
+    
+}
     return 0;
 }
+

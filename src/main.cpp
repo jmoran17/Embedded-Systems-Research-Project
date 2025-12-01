@@ -74,6 +74,16 @@ void* task_thread(void* arg) {
         t->total_jitter += jitter;
         if (jitter > t->worst_jitter) t->worst_jitter = jitter;
 
+          // ----- Jitter Alarm LED -----
+        // If jitter is greater than threshold_us, turn LED on
+        long threshold_us = 1000; // 1ms threshold
+        if (jitter > threshold_us) {
+            set_gpio_value(5, 1);   // alarm ON
+        } else {
+            set_gpio_value(5, 0);   // alarm OFF
+        }
+
+
         led_state = !led_state;
         set_gpio_value(t->gpio, led_state);
 
@@ -97,31 +107,41 @@ void* task_thread(void* arg) {
 }
 
 static void run_default_kernel_demo(int periods) {
-    int g1 = 17, g2 = 27, g3 = 22;
+    // Measure total run time
+    struct timespec global_start, global_end;
+    clock_gettime(CLOCK_MONOTONIC, &global_start);
+    // GPIO pins
+    int g1 = 17;
+    int g2 = 27;
+    int g3 = 22;
+    int jitter_led = 5;
 
+
+    // Setup pins all start off
     export_gpio(g1); set_gpio_direction(g1, "out"); set_gpio_value(g1, 0);
     export_gpio(g2); set_gpio_direction(g2, "out"); set_gpio_value(g2, 0);
     export_gpio(g3); set_gpio_direction(g3, "out"); set_gpio_value(g3, 0);
+    export_gpio(jitter_led);set_gpio_direction(jitter_led, "out");set_gpio_value(jitter_led, 0); 
 
     TaskInfo t1;
     t1.name = "T1_10ms";
     t1.gpio = g1;
     t1.period_ms = 10;
-    t1.compute_ms = 2;
+    t1.compute_ms = 1;
     t1.max_jobs = periods;
 
     TaskInfo t2;
     t2.name = "T2_50ms";
     t2.gpio = g2;
     t2.period_ms = 50;
-    t2.compute_ms = 5;
+    t2.compute_ms = 2;
     t2.max_jobs = periods;
 
     TaskInfo t3;
     t3.name = "T3_100ms";
     t3.gpio = g3;
     t3.period_ms = 100;
-    t3.compute_ms = 8;
+    t3.compute_ms = 3;
     t3.max_jobs = periods;
 
     pthread_t th1, th2, th3;
@@ -154,6 +174,26 @@ static void run_default_kernel_demo(int periods) {
     printf("  Worst jitter: %.3f ms\n", t3.worst_jitter / 1000.0);
     printf("  Avg jitter:   %.3f ms\n", avg3);
     printf("  Deadline misses: %d\n\n", t3.deadline_misses);
+
+        // ---- Total stats for default/kernel mode ----
+    int total_misses = t1.deadline_misses + t2.deadline_misses + t3.deadline_misses;
+    double avg_misses_per_task = (double)total_misses / 3.0;
+
+    clock_gettime(CLOCK_MONOTONIC, &global_end);
+    long total_us = diff_us(global_end, global_start);
+    double total_sec = (double)total_us / 1000000.0;
+
+    printf("TOTAL deadline misses (all tasks): %d\n", total_misses);
+    printf("Average deadline misses per task: %.2f\n", avg_misses_per_task);
+    printf("Total run time: %.3f seconds\n\n", total_sec);
+
+
+    // Turn off LEDs
+    set_gpio_value(g1, 0);
+    set_gpio_value(g2, 0);
+    set_gpio_value(g3, 0);
+    set_gpio_value(jitter_led, 0);
+
 }
 
 // --------- Main: choose mode (default / rms / edf) ---------
