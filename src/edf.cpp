@@ -1,131 +1,104 @@
 #include "edf.h"
 #include "gpio.h"
+#include "scheduler_utils.h"
 
 #include <time.h>
 #include <stdio.h>
-#include <stdlib.h>
 
-// ---- Helpers ----
-
-static long diff_us(struct timespec a, struct timespec b) {
-    long sec  = a.tv_sec  - b.tv_sec;
-    long nsec = a.tv_nsec - b.tv_nsec;
-    return sec * 1000000L + nsec / 1000L;
-}
-
-static void busy_compute(long ms) {
-    struct timespec start, now;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    long target = ms * 1000L;
-    do {
-        clock_gettime(CLOCK_MONOTONIC, &now);
-    } while (diff_us(now, start) < target);
-}
-
-static void add_ms(struct timespec* t, long ms) {
-    t->tv_sec  += ms / 1000;
-    t->tv_nsec += (ms % 1000) * 1000000L;
-    if (t->tv_nsec >= 1000000000L) {
-        t->tv_nsec -= 1000000000L;
-        t->tv_sec  += 1;
-    }
-}
-
-// ---- EDF Task ----
-
+// EDF task definition.
+// Tracks deadlines and next release times.
 struct EDFTask {
     const char* name;
     int gpio;
     long period_ms;
     long compute_ms;
 
-    struct timespec next_release;
-    struct timespec deadline;
+    struct timespec next_release;   // next time this job becomes ready
+    struct timespec deadline;       // absolute deadline for current job
 
-    long worst_jitter;
-    long total_jitter;
+    long worst_jitter_us;
+    long total_jitter_us;
     int jobs;
-    int misses;
-
-    int max_jobs;
+    int deadline_misses;
 };
 
 int run_edf(int jobs_per_task) {
-    struct timespec global_start, global_end;
-    clock_gettime(CLOCK_MONOTONIC, &global_start);
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
-    int g1 = 17, g2 = 27, g3 = 22, jitter_led = 5;
+    int g1 = 17, g2 = 27, g3 = 22, alarm = 5;
+    init_gpio_pins(g1, g2, g3, alarm);
 
-    export_gpio(g1); set_gpio_direction(g1, "out"); set_gpio_value(g1, 0);
-    export_gpio(g2); set_gpio_direction(g2, "out"); set_gpio_value(g2, 0);
-    export_gpio(g3); set_gpio_direction(g3, "out"); set_gpio_value(g3, 0);
-    export_gpio(jitter_led); set_gpio_direction(jitter_led, "out"); set_gpio_value(jitter_led, 0);
-
-    EDFTask T[3];
-
-    T[0] = {"T1_10ms", g1, 10, 1};
-    T[1] = {"T2_50ms", g2, 50, 2};
-    T[2] = {"T3_100ms", g3, 100, 3};
+    // EDF task set: small differences in WCET and period
+    EDFTask tasks[3] = {
+        {"T1_10ms",  g1, 10, 1},
+        {"T2_50ms",  g2, 50, 2},
+        {"T3_100ms", g3, 100, 3}
+    };
 
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
 
+    // Initialize all EDF timing elements
     for (int i = 0; i < 3; i++) {
-        T[i].next_release = now;
-        T[i].deadline = now;
-        add_ms(&T[i].deadline, T[i].period_ms);
-
-        T[i].worst_jitter = 0;
-        T[i].total_jitter = 0;
-        T[i].jobs = 0;
-        T[i].misses = 0;
-        T[i].max_jobs = jobs_per_task;
+        tasks[i].next_release = now;
+        tasks[i].deadline     = now;
+        add_ms(&tasks[i].deadline, tasks[i].period_ms);
+        tasks[i].worst_jitter_us  = 0;
+        tasks[i].total_jitter_us  = 0;
+        tasks[i].jobs             = 0;
+        tasks[i].deadline_misses  = 0;
     }
 
     int remaining = jobs_per_task * 3;
 
+    // Main EDF superloop
     while (remaining > 0) {
         clock_gettime(CLOCK_MONOTONIC, &now);
 
         int best = -1;
         struct timespec best_dl;
 
+        // Find the ready task with the earliest deadline
         for (int i = 0; i < 3; i++) {
-            if (T[i].jobs >= T[i].max_jobs) continue;
+            if (tasks[i].jobs >= jobs_per_task)
+                continue;
 
-            if (diff_us(now, T[i].next_release) >= 0) {
-                if (best == -1 || diff_us(T[i].deadline, best_dl) < 0) {
-                    best = i;
-                    best_dl = T[i].deadline;
-                }
+            // Not ready yet
+            if (diff_us(now, tasks[i].next_release) < 0)
+                continue;
+
+            // If first ready or earlier deadline, select it
+            if (best == -1 ||
+                diff_us(tasks[i].deadline, best_dl) < 0) {
+                best = i;
+                best_dl = tasks[i].deadline;
             }
         }
 
+        // If no task is ready, jump to earliest next release
         if (best == -1) {
-            struct timespec earliest = T[0].next_release;
+            struct timespec earliest = tasks[0].next_release;
             for (int i = 1; i < 3; i++) {
-                if (T[i].jobs < T[i].max_jobs &&
-                    diff_us(T[i].next_release, earliest) < 0) {
-                    earliest = T[i].next_release;
-                }
+                if (tasks[i].jobs < jobs_per_task &&
+                    diff_us(tasks[i].next_release, earliest) < 0)
+                    earliest = tasks[i].next_release;
             }
             clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &earliest, NULL);
             continue;
         }
 
-        EDFTask* t = &T[best];
+        // Run the selected task (non-preemptive execution)
+        EDFTask* t = &tasks[best];
 
-        struct timespec start;
-        clock_gettime(CLOCK_MONOTONIC, &start);
+        struct timespec exec_start;
+        clock_gettime(CLOCK_MONOTONIC, &exec_start);
 
-        long jitter = diff_us(start, t->next_release);
+        long jitter = diff_us(exec_start, t->next_release);
         if (jitter < 0) jitter = -jitter;
-
-        t->total_jitter += jitter;
-        if (jitter > t->worst_jitter) t->worst_jitter = jitter;
-
-        // Jitter LED only lights on deadline misses
-        if (t->misses > 0) set_gpio_value(jitter_led, 1);
+        t->total_jitter_us += jitter;
+        if (jitter > t->worst_jitter_us)
+            t->worst_jitter_us = jitter;
 
         set_gpio_value(t->gpio, 1);
         busy_compute(t->compute_ms);
@@ -134,9 +107,13 @@ int run_edf(int jobs_per_task) {
         struct timespec finish;
         clock_gettime(CLOCK_MONOTONIC, &finish);
 
-        if (diff_us(finish, t->deadline) > 0)
-            t->misses++;
+        // Deadline miss check
+        if (diff_us(finish, t->deadline) > 0) {
+            t->deadline_misses++;
+            deadline_latch_alarm(alarm, t->deadline_misses);
+        }
 
+        // Move to next window
         t->next_release = t->deadline;
         add_ms(&t->deadline, t->period_ms);
 
@@ -144,26 +121,21 @@ int run_edf(int jobs_per_task) {
         remaining--;
     }
 
-    // Stats
-    printf("=== EDF (non-preemptive single-threaded) ===\n\n");
+    // Compute runtime for reporting
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double runtime_sec = diff_us(end, start) / 1e6;
 
-    int total_misses = 0;
+    // Convert EDF stats to shared report format
+    TaskStats stats[3];
     for (int i = 0; i < 3; i++) {
-        double avg = (double)T[i].total_jitter / T[i].jobs / 1000.0;
-
-        printf("%s:\n", T[i].name);
-        printf("  Worst jitter: %.3f ms\n", T[i].worst_jitter / 1000.0);
-        printf("  Avg jitter: %.3f ms\n", avg);
-        printf("  Deadline misses: %d\n\n", T[i].misses);
-
-        total_misses += T[i].misses;
+        stats[i].name            = tasks[i].name;
+        stats[i].worst_jitter_us = tasks[i].worst_jitter_us;
+        stats[i].total_jitter_us = tasks[i].total_jitter_us;
+        stats[i].jobs            = tasks[i].jobs;
+        stats[i].deadline_misses = tasks[i].deadline_misses;
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &global_end);
-    printf("EDF Total deadline misses: %d\n", total_misses);
-    printf("Runtime: %.3f sec\n\n",
-           diff_us(global_end, global_start) / 1e6);
-
-    set_gpio_value(jitter_led, 0);
+    print_scheduler_report("EDF (superloop, non-preemptive)", stats, 3, runtime_sec);
+    reset_gpio_pins(g1, g2, g3, alarm);
     return 0;
 }
