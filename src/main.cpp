@@ -76,13 +76,12 @@ void* task_thread(void* arg) {
 
           // ----- Jitter Alarm LED -----
         // If jitter is greater than threshold_us, turn LED on
-        long threshold_us = 1000; // 1ms threshold
-        if (jitter > threshold_us) {
+        long threshold_us = 2500; // 1ms threshold
+       if (t->deadline_misses > 0) {
             set_gpio_value(5, 1);   // alarm ON
-        } else {
-            set_gpio_value(5, 0);   // alarm OFF
-        }
-
+       } else {
+        set_gpio_value(5,0);
+       }
 
         led_state = !led_state;
         set_gpio_value(t->gpio, led_state);

@@ -143,11 +143,9 @@ int run_rms(int jobs_per_task) {
 
         // ----- Jitter Alarm LED -----
         // If jitter is greater than threshold_us, turn LED on
-        long threshold_us = 1000; // 1ms threshold
-        if (jitter > threshold_us) {
+        long threshold_us = 2500; // 1ms threshold
+        while (T[0].misses > 0 || T[1].misses > 0 || T[2].misses > 0) {
             set_gpio_value(5, 1);   // alarm ON
-        } else {
-            set_gpio_value(5, 0);   // alarm OFF
         }
 
 
@@ -187,7 +185,7 @@ int run_rms(int jobs_per_task) {
         printf("  Worst jitter: %.3f ms\n", T[i].worst_jitter / 1000.0);
         printf("  Avg jitter:   %.3f ms\n", avg_ms);
         printf("  Deadline misses: %d\n\n", T[i].misses);
-
+}
             // ---- Total stats for RMS ----
     int total_misses = 0;
     for (int i = 0; i < 3; i++) {
@@ -202,9 +200,8 @@ int run_rms(int jobs_per_task) {
     printf("RMS - TOTAL deadline misses (all tasks): %d\n", total_misses);
     printf("RMS - Average deadline misses per task: %.2f\n", avg_misses_per_task);
     printf("RMS - Total run time: %.3f seconds\n\n", total_sec);
-
     
-}
+    
     return 0;
 }
 

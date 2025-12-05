@@ -53,6 +53,7 @@ struct TaskState {
 
 int run_edf(int jobs_per_task) {
 
+
     struct timespec global_start, global_end;
     clock_gettime(CLOCK_MONOTONIC, &global_start);
 
@@ -139,11 +140,9 @@ int run_edf(int jobs_per_task) {
 
           // ----- Jitter Alarm LED -----
         // If jitter is greater than threshold_us, turn LED on
-        long threshold_us = 1000; // 1ms threshold
-        if (jitter > threshold_us) {
+        long threshold_us = 2500; // 1ms threshold
+        if (T[0].misses > 0 || T[1].misses > 0 || T[2].misses > 0) {
             set_gpio_value(5, 1);   // alarm ON
-        } else {
-            set_gpio_value(5, 0);   // alarm OFF
         }
 
 
@@ -185,11 +184,9 @@ int run_edf(int jobs_per_task) {
         printf("  Avg jitter:   %.3f ms\n", avg_ms);
         printf("  Deadline misses: %d\n\n", T[i].misses);
 
-            // ---- Total stats for EDF ----
-    int total_misses = 0;
-    for (int i = 0; i < 3; i++) {
-        total_misses += T[i].misses;
     }
+    
+    int total_misses = T[0].misses + T[1].misses + T[2].misses;
     double avg_misses_per_task = (double)total_misses / 3.0;
 
     clock_gettime(CLOCK_MONOTONIC, &global_end);
@@ -200,8 +197,6 @@ int run_edf(int jobs_per_task) {
     printf("EDF - Average deadline misses per task: %.2f\n", avg_misses_per_task);
     printf("EDF - Total run time: %.3f seconds\n\n", total_sec);
 
-    
-}
     return 0;
 }
 
