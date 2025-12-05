@@ -5,7 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-// Same helpers as RMS
+// ---- Helpers ----
+
 static long diff_us(struct timespec a, struct timespec b) {
     long sec  = a.tv_sec  - b.tv_sec;
     long nsec = a.tv_nsec - b.tv_nsec;
@@ -16,7 +17,6 @@ static void busy_compute(long ms) {
     struct timespec start, now;
     clock_gettime(CLOCK_MONOTONIC, &start);
     long target = ms * 1000L;
-
     do {
         clock_gettime(CLOCK_MONOTONIC, &now);
     } while (diff_us(now, start) < target);
@@ -31,94 +31,80 @@ static void add_ms(struct timespec* t, long ms) {
     }
 }
 
-// Task config and state
-struct TaskConf {
+// ---- EDF Task ----
+
+struct EDFTask {
     const char* name;
     int gpio;
     long period_ms;
     long compute_ms;
-};
 
-struct TaskState {
-    TaskConf cfg;
     struct timespec next_release;
     struct timespec deadline;
-    int led_state;
 
     long worst_jitter;
     long total_jitter;
     int jobs;
     int misses;
+
+    int max_jobs;
 };
 
 int run_edf(int jobs_per_task) {
-
-
     struct timespec global_start, global_end;
     clock_gettime(CLOCK_MONOTONIC, &global_start);
 
-    // GPIO pins
-    int g1 = 17;
-    int g2 = 27;
-    int g3 = 22;
-    int jitter_led = 5;
+    int g1 = 17, g2 = 27, g3 = 22, jitter_led = 5;
 
-
-    // Setup pins all start off
     export_gpio(g1); set_gpio_direction(g1, "out"); set_gpio_value(g1, 0);
     export_gpio(g2); set_gpio_direction(g2, "out"); set_gpio_value(g2, 0);
     export_gpio(g3); set_gpio_direction(g3, "out"); set_gpio_value(g3, 0);
-    export_gpio(jitter_led);set_gpio_direction(jitter_led, "out");set_gpio_value(jitter_led, 0); 
+    export_gpio(jitter_led); set_gpio_direction(jitter_led, "out"); set_gpio_value(jitter_led, 0);
+
+    EDFTask T[3];
+
+    T[0] = {"T1_10ms", g1, 10, 1};
+    T[1] = {"T2_50ms", g2, 50, 2};
+    T[2] = {"T3_100ms", g3, 100, 3};
 
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    TaskState T[3];
-
-    T[0].cfg = {"T1_10ms",  g1, 10, 1};
-    T[1].cfg = {"T2_50ms",  g2, 50, 2};
-    T[2].cfg = {"T3_100ms", g3, 100, 3};
-
-    // Initialize timing
     for (int i = 0; i < 3; i++) {
         T[i].next_release = now;
-        T[i].deadline     = now;
-        add_ms(&T[i].deadline, T[i].cfg.period_ms);
+        T[i].deadline = now;
+        add_ms(&T[i].deadline, T[i].period_ms);
 
-        T[i].led_state = 0;
         T[i].worst_jitter = 0;
         T[i].total_jitter = 0;
         T[i].jobs = 0;
         T[i].misses = 0;
+        T[i].max_jobs = jobs_per_task;
     }
 
-    int total_jobs_left = jobs_per_task * 3;
+    int remaining = jobs_per_task * 3;
 
-    // EDF: choose READY task with EARLIEST DEADLINE
-    while (total_jobs_left > 0) {
+    while (remaining > 0) {
         clock_gettime(CLOCK_MONOTONIC, &now);
 
         int best = -1;
-        struct timespec best_deadline;
+        struct timespec best_dl;
 
-        // Pick ready job with earliest deadline
         for (int i = 0; i < 3; i++) {
-            if (T[i].jobs >= jobs_per_task) continue;
+            if (T[i].jobs >= T[i].max_jobs) continue;
 
             if (diff_us(now, T[i].next_release) >= 0) {
-                if (best == -1 ||
-                    diff_us(T[i].deadline, best_deadline) < 0) {
+                if (best == -1 || diff_us(T[i].deadline, best_dl) < 0) {
                     best = i;
-                    best_deadline = T[i].deadline;
+                    best_dl = T[i].deadline;
                 }
             }
         }
 
-        // If no task ready, sleep to earliest release
         if (best == -1) {
             struct timespec earliest = T[0].next_release;
             for (int i = 1; i < 3; i++) {
-                if (T[i].jobs < jobs_per_task &&
+                if (T[i].jobs < T[i].max_jobs &&
                     diff_us(T[i].next_release, earliest) < 0) {
                     earliest = T[i].next_release;
                 }
@@ -127,76 +113,57 @@ int run_edf(int jobs_per_task) {
             continue;
         }
 
-        TaskState* t = &T[best];
+        EDFTask* t = &T[best];
 
         struct timespec start;
         clock_gettime(CLOCK_MONOTONIC, &start);
 
-        // Jitter
         long jitter = diff_us(start, t->next_release);
         if (jitter < 0) jitter = -jitter;
+
         t->total_jitter += jitter;
         if (jitter > t->worst_jitter) t->worst_jitter = jitter;
 
-          // ----- Jitter Alarm LED -----
-        // If jitter is greater than threshold_us, turn LED on
-        long threshold_us = 2500; // 1ms threshold
-        if (T[0].misses > 0 || T[1].misses > 0 || T[2].misses > 0) {
-            set_gpio_value(5, 1);   // alarm ON
-        }
+        // Jitter LED only lights on deadline misses
+        if (t->misses > 0) set_gpio_value(jitter_led, 1);
 
-
-        // Toggle LED
-        t->led_state = !t->led_state;
-        set_gpio_value(t->cfg.gpio, t->led_state);
-
-        // Work
-        busy_compute(t->cfg.compute_ms);
+        set_gpio_value(t->gpio, 1);
+        busy_compute(t->compute_ms);
+        set_gpio_value(t->gpio, 0);
 
         struct timespec finish;
         clock_gettime(CLOCK_MONOTONIC, &finish);
 
-        // Deadline miss
-        if (diff_us(finish, t->deadline) > 0) {
+        if (diff_us(finish, t->deadline) > 0)
             t->misses++;
-        }
 
-        // Next job
         t->next_release = t->deadline;
-        add_ms(&t->deadline, t->cfg.period_ms);
+        add_ms(&t->deadline, t->period_ms);
 
         t->jobs++;
-        total_jobs_left--;
+        remaining--;
     }
 
-    // Turn off LEDs
-    set_gpio_value(g1, 0);
-    set_gpio_value(g2, 0);
-    set_gpio_value(g3, 0);
-    set_gpio_value(jitter_led, 0);
+    // Stats
+    printf("=== EDF (non-preemptive single-threaded) ===\n\n");
 
-
-    // Print stats
+    int total_misses = 0;
     for (int i = 0; i < 3; i++) {
-        double avg_ms = (double)T[i].total_jitter / T[i].jobs / 1000.0;
-        printf("%s:\n", T[i].cfg.name);
+        double avg = (double)T[i].total_jitter / T[i].jobs / 1000.0;
+
+        printf("%s:\n", T[i].name);
         printf("  Worst jitter: %.3f ms\n", T[i].worst_jitter / 1000.0);
-        printf("  Avg jitter:   %.3f ms\n", avg_ms);
+        printf("  Avg jitter: %.3f ms\n", avg);
         printf("  Deadline misses: %d\n\n", T[i].misses);
 
+        total_misses += T[i].misses;
     }
-    
-    int total_misses = T[0].misses + T[1].misses + T[2].misses;
-    double avg_misses_per_task = (double)total_misses / 3.0;
 
     clock_gettime(CLOCK_MONOTONIC, &global_end);
-    long total_us = diff_us(global_end, global_start);
-    double total_sec = (double)total_us / 1000000.0;
+    printf("EDF Total deadline misses: %d\n", total_misses);
+    printf("Runtime: %.3f sec\n\n",
+           diff_us(global_end, global_start) / 1e6);
 
-    printf("EDF - TOTAL deadline misses (all tasks): %d\n", total_misses);
-    printf("EDF - Average deadline misses per task: %.2f\n", avg_misses_per_task);
-    printf("EDF - Total run time: %.3f seconds\n\n", total_sec);
-
+    set_gpio_value(jitter_led, 0);
     return 0;
 }
-

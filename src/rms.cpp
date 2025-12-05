@@ -1,18 +1,21 @@
 #include "rms.h"
 #include "gpio.h"
 
+#include <pthread.h>
+#include <sched.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-// Time difference in microseconds
+// -------- Helpers --------
+
 static long diff_us(struct timespec a, struct timespec b) {
     long sec  = a.tv_sec  - b.tv_sec;
     long nsec = a.tv_nsec - b.tv_nsec;
     return sec * 1000000L + nsec / 1000L;
 }
 
-// Busy wait to simulate work
 static void busy_compute(long ms) {
     struct timespec start, now;
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -23,186 +26,145 @@ static void busy_compute(long ms) {
     } while (diff_us(now, start) < target);
 }
 
-// Add ms to timespec
 static void add_ms(struct timespec* t, long ms) {
     t->tv_sec  += ms / 1000;
     t->tv_nsec += (ms % 1000) * 1000000L;
-
     if (t->tv_nsec >= 1000000000L) {
         t->tv_nsec -= 1000000000L;
         t->tv_sec  += 1;
     }
 }
 
-// Task configuration data
-struct TaskConf {
+// -------- RMS Task --------
+
+struct RMSTask {
     const char* name;
     int gpio;
     long period_ms;
     long compute_ms;
-};
-
-// Task runtime state
-struct TaskState {
-    TaskConf cfg;
-    struct timespec next_release;
-    struct timespec deadline;
-    int led_state;
+    int priority;            // SCHED_FIFO priority
+    int max_jobs;
 
     long worst_jitter;
     long total_jitter;
+    int deadline_misses;
     int jobs;
-    int misses;
+
+    struct timespec next_release;
 };
 
-int run_rms(int jobs_per_task) {
+static RMSTask tasks[3];
+static int jitter_led = 5;
 
-    struct timespec global_start, global_end;
-    clock_gettime(CLOCK_MONOTONIC, &global_start);
+void* rms_thread_fn(void* arg) {
+    RMSTask* t = (RMSTask*)arg;
 
-    // GPIO pins
-    int g1 = 17;
-    int g2 = 27;
-    int g3 = 22;
-    int jitter_led = 5;
-
-
-    // Setup pins all start off
-    export_gpio(g1); set_gpio_direction(g1, "out"); set_gpio_value(g1, 0);
-    export_gpio(g2); set_gpio_direction(g2, "out"); set_gpio_value(g2, 0);
-    export_gpio(g3); set_gpio_direction(g3, "out"); set_gpio_value(g3, 0);
-    export_gpio(jitter_led);set_gpio_direction(jitter_led, "out");set_gpio_value(jitter_led, 0); 
-
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-
-    // 3 periodic tasks
-    TaskState T[3];
-
-    T[0].cfg = {"T1_10ms",  g1, 10, 1};
-    T[1].cfg = {"T2_50ms",  g2, 50, 2};
-    T[2].cfg = {"T3_100ms", g3, 100, 3};
-
-    // Init timing state
-    for (int i = 0; i < 3; i++) {
-        T[i].next_release = now;
-        T[i].deadline     = now;
-        add_ms(&T[i].deadline, T[i].cfg.period_ms);
-
-        T[i].led_state = 0;
-        T[i].worst_jitter = 0;
-        T[i].total_jitter = 0;
-        T[i].jobs = 0;
-        T[i].misses = 0;
+    // Set SCHED_FIFO priority
+    struct sched_param p;
+    p.sched_priority = t->priority;
+    if (sched_setscheduler(0, SCHED_FIFO, &p) != 0) {
+        perror("sched_setscheduler RMS");
     }
 
-    int total_jobs_left = jobs_per_task * 3;
+    t->worst_jitter = 0;
+    t->total_jitter = 0;
+    t->deadline_misses = 0;
+    t->jobs = 0;
 
-    // RMS: choose READY task with SHORTEST PERIOD
-    while (total_jobs_left > 0) {
-        clock_gettime(CLOCK_MONOTONIC, &now);
+    int led_state = 0;
 
-        int best = -1;
-        long best_period = 0;
+    while (t->jobs < t->max_jobs) {
 
-        // Choose highest priority ready task
-        for (int i = 0; i < 3; i++) {
-            if (T[i].jobs >= jobs_per_task) continue;
-
-            if (diff_us(now, T[i].next_release) >= 0) {
-                if (best == -1 || T[i].cfg.period_ms < best_period) {
-                    best = i;
-                    best_period = T[i].cfg.period_ms;
-                }
-            }
-        }
-
-        // If none ready, sleep until earliest next release
-        if (best == -1) {
-            struct timespec earliest = T[0].next_release;
-            for (int i = 1; i < 3; i++) {
-                if (T[i].jobs < jobs_per_task &&
-                    diff_us(T[i].next_release, earliest) < 0) {
-                    earliest = T[i].next_release;
-                }
-            }
-            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &earliest, NULL);
-            continue;
-        }
-
-        TaskState* t = &T[best];
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t->next_release, NULL);
 
         struct timespec start;
         clock_gettime(CLOCK_MONOTONIC, &start);
 
-        // Jitter: difference between actual and ideal start
         long jitter = diff_us(start, t->next_release);
         if (jitter < 0) jitter = -jitter;
+
         t->total_jitter += jitter;
         if (jitter > t->worst_jitter) t->worst_jitter = jitter;
 
-        // ----- Jitter Alarm LED -----
-        // If jitter is greater than threshold_us, turn LED on
-        long threshold_us = 2500; // 1ms threshold
-        while (T[0].misses > 0 || T[1].misses > 0 || T[2].misses > 0) {
-            set_gpio_value(5, 1);   // alarm ON
-        }
-
+        // Deadline
+        struct timespec deadline = t->next_release;
+        add_ms(&deadline, t->period_ms);
 
         // Toggle LED
-        t->led_state = !t->led_state;
-        set_gpio_value(t->cfg.gpio, t->led_state);
+        led_state = !led_state;
+        set_gpio_value(t->gpio, led_state);
 
-        // Do work
-        busy_compute(t->cfg.compute_ms);
+        busy_compute(t->compute_ms);
 
         struct timespec finish;
         clock_gettime(CLOCK_MONOTONIC, &finish);
 
-        // Deadline check
-        if (diff_us(finish, t->deadline) > 0) {
-            t->misses++;
-        }
+        if (diff_us(finish, deadline) > 0)
+            t->deadline_misses++;
 
-        // Schedule next job
-        t->next_release = t->deadline;
-        add_ms(&t->deadline, t->cfg.period_ms);
+        // Next release
+        add_ms(&t->next_release, t->period_ms);
 
         t->jobs++;
-        total_jobs_left--;
     }
 
-    // Turn off LEDs
-    set_gpio_value(g1, 0);
-    set_gpio_value(g2, 0);
-    set_gpio_value(g3, 0);
-    set_gpio_value(jitter_led, 0);
-
-    // Print stats
-    for (int i = 0; i < 3; i++) {
-        double avg_ms = (double)T[i].total_jitter / T[i].jobs / 1000.0;
-        printf("%s:\n", T[i].cfg.name);
-        printf("  Worst jitter: %.3f ms\n", T[i].worst_jitter / 1000.0);
-        printf("  Avg jitter:   %.3f ms\n", avg_ms);
-        printf("  Deadline misses: %d\n\n", T[i].misses);
+    set_gpio_value(t->gpio, 0);
+    return NULL;
 }
-            // ---- Total stats for RMS ----
+
+// -------- PUBLIC: run_rms() --------
+
+int run_rms(int jobs_per_task) {
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    int g1 = 17, g2 = 27, g3 = 22;
+    jitter_led = 5;
+
+    export_gpio(g1); set_gpio_direction(g1, "out"); set_gpio_value(g1, 0);
+    export_gpio(g2); set_gpio_direction(g2, "out"); set_gpio_value(g2, 0);
+    export_gpio(g3); set_gpio_direction(g3, "out"); set_gpio_value(g3, 0);
+    export_gpio(jitter_led); set_gpio_direction(jitter_led, "out"); set_gpio_value(jitter_led, 0);
+
+    // RMS priority assignment (shorter period = higher priority)
+    tasks[0] = {"T1_10ms",  g1, 10, 1, 90, jobs_per_task};
+    tasks[1] = {"T2_50ms",  g2, 50, 2, 70, jobs_per_task};
+    tasks[2] = {"T3_100ms", g3, 100, 3, 60, jobs_per_task};
+
+    // Common start time
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    for (int i = 0; i < 3; i++) {
+        tasks[i].next_release = now;
+    }
+
+    pthread_t threads[3];
+    for (int i = 0; i < 3; i++)
+        pthread_create(&threads[i], NULL, rms_thread_fn, &tasks[i]);
+
+    for (int i = 0; i < 3; i++)
+        pthread_join(threads[i], NULL);
+
+    // Stats
+    printf("=== RMS (preemptive SCHED_FIFO) ===\n\n");
+
     int total_misses = 0;
     for (int i = 0; i < 3; i++) {
-        total_misses += T[i].misses;
+        double avg = (double)tasks[i].total_jitter / tasks[i].jobs / 1000.0;
+
+        printf("%s:\n", tasks[i].name);
+        printf("  Worst jitter: %.3f ms\n", tasks[i].worst_jitter / 1000.0);
+        printf("  Avg jitter: %.3f ms\n", avg);
+        printf("  Deadline misses: %d\n\n", tasks[i].deadline_misses);
+
+        total_misses += tasks[i].deadline_misses;
     }
-    double avg_misses_per_task = (double)total_misses / 3.0;
 
-    clock_gettime(CLOCK_MONOTONIC, &global_end);
-    long total_us = diff_us(global_end, global_start);
-    double total_sec = (double)total_us / 1000000.0;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    printf("RMS Total deadline misses: %d\n", total_misses);
+    printf("Runtime: %.3f sec\n\n",
+           diff_us(end, start) / 1e6);
 
-    printf("RMS - TOTAL deadline misses (all tasks): %d\n", total_misses);
-    printf("RMS - Average deadline misses per task: %.2f\n", avg_misses_per_task);
-    printf("RMS - Total run time: %.3f seconds\n\n", total_sec);
-    
-    
+    set_gpio_value(jitter_led, 0);
     return 0;
 }
-
-    
