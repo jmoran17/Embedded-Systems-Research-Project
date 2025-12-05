@@ -21,6 +21,7 @@ struct RMSTask {
     int jobs;
 
     struct timespec next_release;
+    int max_jobs;
 };
 
 static const int alarm_led = 5;
@@ -37,7 +38,7 @@ void* rms_thread_fn(void* arg) {
 
     int led_state = 0;
 
-    while (t->jobs < t->compute_ms) {
+    while (t->jobs < t->max_jobs) {
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t->next_release, NULL);
 
         struct timespec start;
@@ -45,6 +46,7 @@ void* rms_thread_fn(void* arg) {
 
         long jitter = diff_us(start, t->next_release);
         if (jitter < 0) jitter = -jitter;
+
         t->total_jitter_us += jitter;
         if (jitter > t->worst_jitter_us)
             t->worst_jitter_us = jitter;
@@ -52,8 +54,7 @@ void* rms_thread_fn(void* arg) {
         struct timespec deadline = t->next_release;
         add_ms(&deadline, t->period_ms);
 
-        // Toggle task LED to visualize execution.
-        led_state = !led_state;
+        int led_state = !led_state;
         set_gpio_value(t->gpio, led_state);
 
         busy_compute(t->compute_ms);
