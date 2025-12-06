@@ -143,22 +143,22 @@ Optional but recommended for best RT performance:
 sudo sh -c "echo -1 > /proc/sys/kernel/sched_rt_runtime_us"
 
 ## Running the Demo
-### DEFAULT Scheduler (CFS)
+### DEFAULT Scheduler (CFS)  
 sudo ./scheduler_demo --mode default --periods 200
 
-### RMS Scheduler (SCHED_FIFO)
+### RMS Scheduler (SCHED_FIFO)  
 sudo chrt -f 90 ./scheduler_demo --mode rms --jobs 200
 
-### EDF Scheduler (superloop)
+### EDF Scheduler (superloop)  
 sudo chrt -f 90 ./scheduler_demo --mode edf --jobs 200
 
 
 ### You can also chain all three:
-
+```
 sudo ./scheduler_demo --mode default --periods 200 &&
 sudo chrt -f 90 ./scheduler_demo --mode rms --jobs 200 &&
 sudo chrt -f 90 ./scheduler_demo --mode edf --jobs 200
-
+```
 ## Jitter & Deadline Reporting
 
 At the end of each run, the program prints:
@@ -174,15 +174,14 @@ Total runtime
 All three schedulers output identical statistic formats for easier comparison.
 
 ### Example:
-
+```
 === RMS (preemptive SCHED_FIFO) ===
 
 T1_10ms:
   Worst jitter: 0.070 ms
   Avg jitter:   0.004 ms
   Deadline misses: 0
-...
-
+```
 ## Visualization
 
 To help interpret results, you can plot:
