@@ -213,6 +213,6 @@ System load amplifies the differences between schedulers
 GPIO output provides intuitive real-world visualization
 
 ## Authors  
-Joseph Moran & Nick Cuda
-Cal Poly Pomona — Embedded Systems / Real-Time Research Project
+Joseph Moran & Nick Cuda  
+Cal Poly Pomona — Embedded Systems / Real-Time Research Project  
 2025
