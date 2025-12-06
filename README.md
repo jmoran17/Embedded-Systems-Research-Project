@@ -213,18 +213,7 @@ System load amplifies the differences between schedulers
 
 GPIO output provides intuitive real-world visualization
 
-## Folder Structure
-src/
- ├── scheduler_demo (compiled executable)
- ├── main.cpp
- ├── rms.cpp / rms.h
- ├── edf.cpp / edf.h
- ├── gpio.cpp / gpio.h
- ├── scheduler_utils.cpp / scheduler_utils.h
- └── README.md
-
-## Authors
-
+## Authors  
 Joseph Moran & Nick Cuda
 Cal Poly Pomona — Embedded Systems / Real-Time Research Project
 2025
